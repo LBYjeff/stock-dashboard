@@ -1,0 +1,84 @@
+name: 每日更新看盤
+
+on:
+  schedule:
+    - cron: "30 8 * * 1-5"
+    - cron: "30 22 * * 1-5"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["config.json"]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: daily-update
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TZ: Asia/Taipei
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-cloud.txt
+
+      - name: 安裝套件
+        run: pip install -r requirements-cloud.txt
+
+      - name: 取回昨天的資料庫
+        run: |
+          if git fetch --depth 1 origin data 2>/dev/null; then
+            git checkout FETCH_HEAD -- market.db 2>/dev/null || true
+            git checkout FETCH_HEAD -- calib.json 2>/dev/null || true
+            git reset -q
+          else
+            echo "第一次執行：建立新資料庫"
+          fi
+
+      - name: 更新資料與重新訓練模型
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python update.py --all
+
+      - name: 產生網頁
+        run: python build_site.py --repo "${{ github.repository }}"
+
+      - name: 存回資料庫
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p /tmp/dbsave && cp market.db /tmp/dbsave/ && (cp calib.json /tmp/dbsave/ 2>/dev/null || true)
+          git branch -D data-snapshot 2>/dev/null || true
+          git checkout -q --orphan data-snapshot
+          git rm -rq --cached . || true
+          cp /tmp/dbsave/* .
+          git add -f market.db $(ls calib.json 2>/dev/null)
+          git commit -qm "資料庫 $(date '+%Y-%m-%d %H:%M')"
+          git push -qf origin data-snapshot:data
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
