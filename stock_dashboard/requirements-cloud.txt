@@ -1,0 +1,7 @@
+# 雲端每日快照版（GitHub Actions）只需要這些，不需要 streamlit
+numpy
+pandas>=2.0
+requests>=2.31
+yfinance>=0.2.54
+plotly>=5.20
+exchange_calendars>=4.5
