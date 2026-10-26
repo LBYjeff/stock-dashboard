@@ -365,13 +365,16 @@ async function ghGet() {
   const r = await fetch(GH.url() + "?ref=main&t=" + Date.now(), { headers: GH.headers(), cache: "no-store" });
   if (!r.ok) throw new Error(ghError(r.status));
   const j = await r.json();
-  return { sha: j.sha, cfg: JSON.parse(b64dec(j.content)) };
+  const text = b64dec(j.content).replace(/^\uFEFF/, "").replace(/,\s*([}\]])/g, "$1");   // 容忍多餘逗號、BOM
+  try { return { sha: j.sha, cfg: JSON.parse(text) }; }
+  catch (e) { throw new Error("GitHub 上的 config.json 格式有誤（可能少了引號或括號），請到 GitHub 檢查。"); }
 }
 async function ghEdit(mutate) {          // 讀取 → 修改 → 寫回；遇到同時修改的衝突自動重試一次
   for (let i = 0; i < 2; i++) {
     const { sha, cfg } = await ghGet();
     cfg.watchlists = cfg.watchlists || {};
     const msg = mutate(cfg);
+    for (const k of Object.keys(cfg.watchlists)) cfg.watchlists[k] = [...new Set(cfg.watchlists[k])];   // 去除重複
     const r = await fetch(GH.url(), { method: "PUT", headers: GH.headers(),
       body: JSON.stringify({ message: msg, content: b64enc(JSON.stringify(cfg, null, 2) + "\n"), sha, branch: "main" }) });
     if (r.ok) return;
