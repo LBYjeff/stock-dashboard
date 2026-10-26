@@ -28,16 +28,45 @@ const num = (v, d = 2) => (v === null || v === undefined || isNaN(v)) ? "—" : 
 const sgn = (v, d = 2) => (v === null || v === undefined || isNaN(v)) ? "—" : (v > 0 ? "+" : "") + num(v, d);
 const pct = (v) => (v === null || v === undefined || isNaN(v)) ? "—" : Math.round(v * 100) + "%";
 const col = (v) => (!v || isNaN(v)) ? "var(--label2)" : v > 0 ? "var(--red)" : "var(--green)";
-const codes = () => (SUM.lists[wl] || []);
+// 剛用「＋」加入／移除、雲端還沒更新完的股票，先記在這台裝置（pending）
+function pendingAll() { try { return JSON.parse(LS.get("pending", "{}")) || {}; } catch (e) { return {}; } }
+function savePending(p) { LS.set("pending", JSON.stringify(p)); }
+function pendingOf(list) { const p = pendingAll()[list] || {}; return { add: p.add || [], remove: p.remove || [], t: p.t || 0 }; }
+function markPending(list, add = [], remove = []) {
+  const all = pendingAll();
+  const p = pendingOf(list);
+  p.add = [...new Set([...p.add.filter((c) => !remove.includes(c)), ...add])];
+  p.remove = [...new Set([...p.remove.filter((c) => !add.includes(c)), ...remove])];
+  p.t = Date.now();
+  all[list] = p; savePending(all);
+}
+function cleanPending() {             // 雲端更新後已反映的就清掉；超過 1 天的也清掉
+  const all = pendingAll();
+  for (const [list, p] of Object.entries(all)) {
+    const base = SUM.lists[list] || [];
+    p.add = (p.add || []).filter((c) => !(base.includes(c) && SUM.stocks[c]));
+    p.remove = (p.remove || []).filter((c) => base.includes(c));
+    if ((!p.add.length && !p.remove.length) || Date.now() - (p.t || 0) > 864e5) delete all[list];
+  }
+  savePending(all);
+}
+const codes = () => {
+  const p = pendingOf(wl);
+  const cs = (SUM.lists[wl] || []).filter((c) => !p.remove.includes(c));
+  p.add.forEach((c) => { if (!cs.includes(c)) cs.push(c); });
+  return cs;
+};
+const isPending = (c) => pendingOf(wl).add.includes(c) && !(SUM.lists[wl] || []).includes(c);
 const nameOf = (c) => (SUM.stocks[c] || {}).name || c;
 const isTW = (c) => /^\d{4,6}[A-Z]?$/.test(c);
 
-function nav(title, sub, back, large = true) {
+function nav(title, sub, back, large = true, right = "") {
   const b = back ? `<a class="back" href="${back[1]}"><b>‹</b>${esc(back[0])}</a>` : "";
   const s = sub ? `<div class="sub">${esc(sub)}</div>` : "";
   const h = large ? "h1" : "h2";
-  return `<div class="nav">${b}${s}<${h}>${esc(title)}</${h}></div>`;
+  return `<div class="nav">${right}${b}${s}<${h}>${esc(title)}</${h}></div>`;
 }
+const PLUS = '<button class="act" data-act="add" aria-label="新增股票"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>';
 const section = (header, cells, footer) =>
   (header ? `<div class="sec-h">${esc(header)}</div>` : "") + `<div class="grp">${cells}</div>` + (footer ? `<div class="sec-f">${footer}</div>` : "");
 function cell(k, v = "", { sub, link, vcolor, chev, attrs } = {}) {
@@ -86,13 +115,15 @@ function plot(id, fig) {
 // ---------------------------------------------------------------- 自選股
 function pageWatch() {
   const cs = codes();
-  let h = nav("自選股", `${wl}・${cs.length} 檔・更新於 ${SUM.updated}`);
-  if (!cs.length) return h + `<div class="empty">這組清單是空的。<br><a href="#/settings">到「設定」看怎麼加股票</a></div>`;
+  let h = nav("自選股", `${wl}・${cs.length} 檔・更新於 ${SUM.updated}`, null, true, PLUS);
+  if (!cs.length) return h + `<div class="empty">這組清單是空的。<br>點右上角「＋」加入股票。</div>`;
   h += seg("market", ["全部", "台股", "美股"], UI.market);
   const show = cs.filter((c) => UI.market === "全部" || (UI.market === "台股") === isTW(c));
   const rows = show.map((c) => {
     const s = SUM.stocks[c] || {};
-    if (s.nodata) return cell(`<span class="sym">${esc(c)}</span>`, "尚無資料", { sub: esc(s.name || ""), chev: false });
+    if (isPending(c) || !SUM.stocks[c]) return cell(`<span class="sym">${esc(c)}</span>`, "⏳ 更新中",
+      { sub: "已加入，雲端下載資料與訓練模型約需 10～15 分鐘", chev: false });
+    if (s.nodata) return cell(`<span class="sym">${esc(c)}</span>`, "尚無資料", { sub: esc(s.name || "") + "（代號可能有誤）", chev: false });
     const f = (s.forecasts || {})[model];
     const tags = f ? trendTag(f, 5) + trendTag(f, 20) : '<span class="tag">尚無預測</span>';
     return `<a class="cell" href="#/watch/${encodeURIComponent(c)}" style="min-height:64px"><div class="k"><div class="sym">${esc(c)}</div>
@@ -155,6 +186,9 @@ async function pageStock(c) {
   }
   h += section(null, cell("查看 5／20 日預測", "", { link: `#/predict/${encodeURIComponent(c)}` }) +
     cell("查看預測檢討", "", { link: `#/review/${encodeURIComponent(c)}` }));
+  if (codes().includes(c)) {
+    h += section(null, cell(`<span style="color:var(--red)">從「${esc(wl)}」移除</span>`, "", { attrs: `data-remove="${esc(c)}"`, chev: false }));
+  }
   return [h, after];
 }
 
@@ -302,11 +336,165 @@ function pageSettings() {
     gh ? cell("立即更新", "", { link: `${gh}/actions/workflows/daily.yml`, sub: "開啟 GitHub，按「Run workflow」" }) : "",
   ].join(""), "自動更新由 GitHub 雲端執行，不需要你的電腦開著。");
   h += section("自選股管理", [
-    gh ? cell("新增／移除股票、建立清單", "", { link: `${gh}/edit/main/config.json`, sub: "在 GitHub 編輯 config.json，存檔後約 5～15 分鐘自動更新網頁" }) : cell("新增／移除股票", "編輯 config.json"),
-  ].join(""), '格式範例：{"watchlists": {"我的自選": ["2330", "NVDA"], "手機": ["0050"]}}');
+    cell("GitHub 連線", GH.token() ? '<span class="check">已設定 ✓</span>' : "未設定",
+      { attrs: 'data-act="token"', chev: true, sub: "設定後即可用自選股右上角「＋」新增、在個股頁移除" }),
+    gh ? cell("在 GitHub 直接編輯清單", "", { link: `${gh}/edit/main/config.json`, sub: "可建立／重新命名多組清單" }) : "",
+  ].join(""), "權杖只存在這台裝置的瀏覽器，每台裝置第一次使用時設定一次。");
   h += section("關於", [cell("版本", "每日快照版・iOS 介面"), cell("介面規範", "依 Apple 人機介面指南"), cell("資料來源", "Yahoo Finance、FinMind")].join(""),
     "⚠️ 所有預測為統計推估，不構成投資建議。");
   return h;
+}
+
+// ---------------------------------------------------------------- GitHub 連線（修改 config.json）
+const GH = {
+  token: () => LS.get("gh_token", ""),
+  headers() {
+    return { Authorization: `Bearer ${this.token()}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
+  },
+  url: () => `https://api.github.com/repos/${SUM.repo}/contents/config.json`,
+};
+const b64dec = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g, "")), (c) => c.charCodeAt(0)));
+const b64enc = (s) => { const b = new TextEncoder().encode(s); let o = ""; b.forEach((x) => { o += String.fromCharCode(x); }); return btoa(o); };
+function ghError(status) {
+  return ({ 401: "權杖無效或已過期，請到「設定 → GitHub 連線」重新設定。",
+            403: "權杖沒有寫入權限：建立權杖時 Contents 要選「Read and write」。",
+            404: "找不到儲存庫：權杖要授權給這個儲存庫（Only select repositories）。" })[status]
+    || `GitHub 回應錯誤（${status}），請稍後再試。`;
+}
+async function ghGet() {
+  const r = await fetch(GH.url() + "?ref=main&t=" + Date.now(), { headers: GH.headers(), cache: "no-store" });
+  if (!r.ok) throw new Error(ghError(r.status));
+  const j = await r.json();
+  return { sha: j.sha, cfg: JSON.parse(b64dec(j.content)) };
+}
+async function ghEdit(mutate) {          // 讀取 → 修改 → 寫回；遇到同時修改的衝突自動重試一次
+  for (let i = 0; i < 2; i++) {
+    const { sha, cfg } = await ghGet();
+    cfg.watchlists = cfg.watchlists || {};
+    const msg = mutate(cfg);
+    const r = await fetch(GH.url(), { method: "PUT", headers: GH.headers(),
+      body: JSON.stringify({ message: msg, content: b64enc(JSON.stringify(cfg, null, 2) + "\n"), sha, branch: "main" }) });
+    if (r.ok) return;
+    if (r.status !== 409 && r.status !== 422) throw new Error(ghError(r.status));
+  }
+  throw new Error("清單剛好被同時修改，請再試一次。");
+}
+function parseCodes(t) {
+  return [...new Set(t.replace(/，/g, ",").split(/[,\s]+/).map((x) => x.trim().toUpperCase().replace(/\.TWO?$/, "")).filter(Boolean))];
+}
+
+function openSheet(inner) {
+  closeSheet(true);
+  const ov = document.createElement("div");
+  ov.className = "ov";
+  ov.innerHTML = `<div class="sheet" role="dialog"><div class="grab"></div>${inner}</div>`;
+  ov.addEventListener("click", (e) => { if (e.target === ov) closeSheet(); });
+  document.body.appendChild(ov);
+  requestAnimationFrame(() => ov.classList.add("show"));
+  return ov;
+}
+function closeSheet(now = false) {
+  document.querySelectorAll(".ov").forEach((o) => { o.classList.remove("show"); now ? o.remove() : setTimeout(() => o.remove(), 260); });
+}
+function toast(t) {
+  const el = document.createElement("div");
+  el.className = "toast"; el.textContent = t;
+  document.body.appendChild(el);
+  setTimeout(() => el.classList.add("show"), 10);
+  setTimeout(() => { el.classList.remove("show"); setTimeout(() => el.remove(), 300); }, 3200);
+}
+const setMsg = (ov, t, cls = "") => { const m = ov.querySelector(".msg"); m.className = "msg " + cls; m.textContent = t; };
+
+function openAdd() {
+  if (!SUM.repo) { toast("這個網頁沒有連結 GitHub 儲存庫"); return; }
+  if (!GH.token()) { openToken(true); return; }
+  const lists = Object.keys(SUM.lists);
+  const ov = openSheet(`<div class="sheet-bar"><button data-x>取消</button><b>新增股票</b><button class="done" data-ok>加入</button></div>
+    <input class="field" id="addcode" placeholder="台股 2330、美股 NVDA，可用逗號一次多檔" autocomplete="off" autocapitalize="characters" enterkeyhint="done">
+    ${lists.length > 1 ? `<div class="sec-h" style="margin-left:4px">加入到</div><select class="picker" id="addlist">${lists.map((n) =>
+      `<option ${n === wl ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>` : ""}
+    <div class="msg">加入後，雲端會下載資料並訓練這檔的模型，約 10～15 分鐘後出現在清單。</div>`);
+  const inp = ov.querySelector("#addcode");
+  setTimeout(() => inp.focus(), 300);
+  const go = async () => {
+    const cs = parseCodes(inp.value);
+    if (!cs.length) { setMsg(ov, "請輸入股票代號。", "err"); return; }
+    const bad = cs.filter((c) => !/^(\d{4,6}[A-Z]?|[A-Z][A-Z0-9.\-]{0,9})$/.test(c));
+    if (bad.length) { setMsg(ov, `代號格式不對：${bad.join("、")}`, "err"); return; }
+    const list = (ov.querySelector("#addlist") || {}).value || wl;
+    const btn = ov.querySelector("[data-ok]");
+    btn.disabled = true; btn.textContent = "儲存中…"; setMsg(ov, "正在寫入 GitHub…");
+    try {
+      let added = [];
+      await ghEdit((cfg) => {
+        const L = cfg.watchlists[list] = cfg.watchlists[list] || [];
+        added = cs.filter((c) => !L.includes(c));
+        L.push(...added);
+        return `新增 ${cs.join(", ")} 到「${list}」`;
+      });
+      markPending(list, added);
+      closeSheet();
+      const dup = cs.filter((c) => !added.includes(c));
+      toast(added.length ? `已加入 ${added.join("、")}，約 10～15 分鐘後出現資料` + (dup.length ? `（${dup.join("、")} 已在清單中）` : "")
+                         : "這些股票已經在清單裡了");
+      render(true);
+    } catch (e) {
+      btn.disabled = false; btn.textContent = "加入"; setMsg(ov, e.message || "連線失敗，請檢查網路。", "err");
+    }
+  };
+  ov.querySelector("[data-ok]").onclick = go;
+  ov.querySelector("[data-x]").onclick = () => closeSheet();
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+}
+
+function confirmRemove(c) {
+  const ov = openSheet(`<div class="sheet-bar"><span></span><b>移除股票</b><span></span></div>
+    <div class="msg" style="text-align:center">要從「${esc(wl)}」移除 ${esc(c)} ${esc(nameOf(c))} 嗎？</div>
+    <button class="btn" data-ok style="color:var(--red)">移除</button><button class="btn" data-x>取消</button>`);
+  ov.querySelector("[data-x]").onclick = () => closeSheet();
+  ov.querySelector("[data-ok]").onclick = async () => {
+    if (!GH.token()) { closeSheet(true); openToken(true); return; }
+    const btn = ov.querySelector("[data-ok]");
+    btn.disabled = true; btn.textContent = "移除中…";
+    try {
+      await ghEdit((cfg) => {
+        cfg.watchlists[wl] = (cfg.watchlists[wl] || []).filter((x) => x !== c);
+        return `從「${wl}」移除 ${c}`;
+      });
+      markPending(wl, [], [c]);
+      closeSheet(); toast(`已移除 ${c}`);
+      location.hash = "#/watch";
+    } catch (e) { btn.disabled = false; btn.textContent = "移除"; setMsg(ov, e.message || "連線失敗", "err"); }
+  };
+}
+
+function openToken(fromAdd = false) {
+  const has = !!GH.token();
+  const ov = openSheet(`<div class="sheet-bar"><button data-x>取消</button><b>GitHub 連線</b><button class="done" data-ok>儲存</button></div>
+    ${fromAdd ? '<div class="msg">要用「＋」新增股票，這台裝置需要先設定一次 GitHub 權杖。</div>' : ""}
+    <div class="grp" style="font-size:15px">
+      <div class="cell"><div class="k">1. 到 GitHub 建立權杖<small><a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">開啟建立權杖頁面 ↗</a></small></div></div>
+      <div class="cell"><div class="k">2. Repository access 選 <b>Only select repositories</b><small>選擇 ${esc((SUM.repo || "").split("/")[1] || "這個儲存庫")}</small></div></div>
+      <div class="cell"><div class="k">3. Permissions → Repository permissions<small><b>Contents</b> 設為 <b>Read and write</b>，其他不用動</small></div></div>
+      <div class="cell"><div class="k">4. 按 Generate token，複製後貼在下面</div></div>
+    </div>
+    <input class="field" id="tok" type="password" placeholder="github_pat_…" autocomplete="off" style="margin-top:10px">
+    <div class="msg">權杖只存在這台裝置，而且只能修改這個儲存庫的檔案。</div>
+    ${has ? '<button class="btn" data-clear style="color:var(--red)">移除這台裝置的連線</button>' : ""}`);
+  ov.querySelector("[data-x]").onclick = () => closeSheet();
+  const clr = ov.querySelector("[data-clear]");
+  if (clr) clr.onclick = () => { LS.set("gh_token", ""); closeSheet(); toast("已移除連線"); render(true); };
+  ov.querySelector("[data-ok]").onclick = async () => {
+    const t = ov.querySelector("#tok").value.trim();
+    if (!t) { setMsg(ov, "請貼上權杖。", "err"); return; }
+    const old = GH.token();
+    LS.set("gh_token", t); setMsg(ov, "驗證中…");
+    try {
+      await ghGet();
+      setMsg(ov, "連線成功 ✓", "ok");
+      setTimeout(() => { closeSheet(); render(true); if (fromAdd) setTimeout(openAdd, 300); }, 600);
+    } catch (e) { LS.set("gh_token", old); setMsg(ov, e.message || "驗證失敗", "err"); }
+  };
 }
 
 // ---------------------------------------------------------------- 路由
@@ -343,7 +531,12 @@ document.addEventListener("click", (e) => {
   const w = e.target.closest("[data-wl]");
   if (w) { wl = w.dataset.wl; LS.set("wl", wl); render(true); return; }
   const m = e.target.closest("[data-model]");
-  if (m) { model = m.dataset.model; LS.set("model", model); render(true); }
+  if (m) { model = m.dataset.model; LS.set("model", model); render(true); return; }
+  const a = e.target.closest("[data-act]");
+  if (a && a.dataset.act === "add") { openAdd(); return; }
+  if (a && a.dataset.act === "token") { openToken(); return; }
+  const r = e.target.closest("[data-remove]");
+  if (r) confirmRemove(r.dataset.remove);
 });
 window.addEventListener("hashchange", () => render(false));
 
@@ -355,6 +548,7 @@ window.addEventListener("hashchange", () => render(false));
     return;
   }
   if (!SUM.lists[wl]) wl = Object.keys(SUM.lists)[0] || "";
+  cleanPending();
   if (!MODEL[model]) model = "champion";
   render();
 })();
