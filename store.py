@@ -74,14 +74,21 @@ DEFAULT_LISTS = {"我的自選": ["2330", "2454", "0050", "NVDA", "TSM", "AAPL"]
 
 
 def load_cfg() -> dict:
-    try:
-        cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
-    except Exception:
-        cfg = {}
+    cfg = {}
+    if CONFIG.exists():
+        import re
+        text = CONFIG.read_text(encoding="utf-8-sig")              # 容忍 BOM
+        text = re.sub(r",\s*([}\]])", r"\1", text)               # 容忍最後一項多一個逗號
+        try:
+            cfg = json.loads(text)
+        except Exception as e:
+            print(f"⚠️ config.json 格式有誤，暫用預設清單：{e}")
     if "watchlists" not in cfg:                       # 舊版只有一組 watchlist
         cfg["watchlists"] = {"我的自選": cfg.get("watchlist") or DEFAULT_LISTS["我的自選"]}
     if not cfg["watchlists"]:
         cfg["watchlists"] = dict(DEFAULT_LISTS)
+    cfg["watchlists"] = {k: list(dict.fromkeys(str(x).strip().upper() for x in v if str(x).strip()))
+                         for k, v in cfg["watchlists"].items()}              # 去除重複、空白
     cfg.setdefault("finmind_token", "")
     cfg.setdefault("model_mode", "auto")             # auto / rule / calib / ml
     cfg.setdefault("auto_update", True)
