@@ -94,7 +94,20 @@ function trendTag(f, h) {
   if (!f || f["p" + h] == null) return "";
   const d = f["dir" + h] || 0;
   const [cls, a, w] = d > 0 ? ["up", "▲", "偏多"] : d < 0 ? ["dn", "▼", "偏空"] : ["", "●", "盤整"];
-  return `<span class="tag ${cls}">${h}日 ${a}${w} ${sgn((f["p" + h] / f.close - 1) * 100, 1)}%</span>`;
+  return `<span class="tag ${cls}">${h}日 ${a}${w} ${sgn((f["p" + h] / f.close - 1) * 100, 1)}%</span>` +
+    (h === 20 && f.high_vol ? '<span class="tag" style="color:var(--orange)">⚡高波動</span>' : "");
+}
+function marketCard() {
+  const m = SUM.market || {};
+  const ks = Object.keys(m);
+  if (!ks.length) return "";
+  return section("大盤環境", ks.map((k) => {
+    const x = m[k];
+    const c = x.regime == null ? "var(--label2)" : x.regime > 0.15 ? "var(--red)" : x.regime < -0.15 ? "var(--green)" : "var(--label2)";
+    const sub = [`月線 RSI6 ${num(x.mrsi6, 0)}・週線 RSI6 ${num(x.wrsi6, 0)}`, ...(x.notes || [])].join("・") +
+      (x.high_vol ? `<br><span style="color:var(--orange)">⚡ 高波動：預測區間已放寬 1.5 倍，請降低部位</span>` : "");
+    return cell(`${esc(k)}`, `<b style="color:${c}">${esc(x.label)}</b> ${x.regime == null ? "" : sgn(x.regime, 2)}`, { sub });
+  }).join(""), "20 日預測會依大盤格局調整：空頭時逆勢的偏多訊號打折、多頭時逆勢的偏空訊號打折。");
 }
 const fmtVol = (v, tw) => tw ? num(v / 1000, 0) + " 張" : v >= 1e9 ? num(v / 1e9) + "B" : v >= 1e6 ? num(v / 1e6) + "M" : num(v, 0);
 
@@ -194,7 +207,7 @@ async function pageStock(c) {
 
 // ---------------------------------------------------------------- 預測
 function pagePredict() {
-  let h = nav("預測", `${MODEL[model]}・未來 5／20 個交易日`);
+  let h = nav("預測", `${MODEL[model]}・未來 5／20 個交易日`) + marketCard();
   const rows = codes().map((c) => {
     const s = SUM.stocks[c] || {};
     const f = (s.forecasts || {})[model];
