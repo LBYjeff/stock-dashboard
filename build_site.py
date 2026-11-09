@@ -278,6 +278,53 @@ def stock_payload(c: str) -> dict | None:
     })
 
 
+# ================================================================ 排行榜
+RANK_MODELS = ("champion", "rule", "calib", "ml")
+
+
+def build_ranking(watch: list[str], top: int = 10) -> tuple[dict, set]:
+    """股票池＋自選股中，各模型 5 日／20 日預估漲幅最高的前 top 名。回傳 (排行資料, 需要明細頁的代號)。"""
+    uni = S.load_universe()
+    pool = {"台股": [c for c in dict.fromkeys(uni["台股"] + [c for c in watch if D.is_tw(c)])],
+            "美股": [c for c in dict.fromkeys(uni["美股"] + [c for c in watch if not D.is_tw(c)])]}
+    rank, need = {}, set()
+    for mk, codes in pool.items():
+        cand = []
+        for c in codes:
+            fcs = S.load_forecasts(c)
+            if not fcs:
+                continue
+            px = S.load_prices(c)
+            if len(px) < 2:
+                continue
+            st = {h: S.load_state(c, h) for h in EV.HS}
+            cand.append((c, fcs, px, st))
+        if not cand:
+            continue
+        newest = max(x[2].index[-1] for x in cand)
+        cand = [x for x in cand if (newest - x[2].index[-1]).days <= 7]          # 排除停牌、下市、太久沒更新
+        rank[mk] = {"pool": len(codes), "valid": len(cand), "date": f"{newest:%Y-%m-%d}", "lists": {}}
+        for m in RANK_MODELS:
+            for h in EV.HS:
+                rows = []
+                for c, fcs, px, st in cand:
+                    f = fcs.get(m)
+                    if not f or f.get(f"p{h}") is None or not f.get("close"):
+                        continue
+                    used = f.get(f"model{h}", m) if m == "champion" else m
+                    met = ((st[h].get("metrics") or {}).get(used) or {})
+                    close, prev = float(px["Close"].iloc[-1]), float(px["Close"].iloc[-2])
+                    rows.append({"code": c, "name": S.get_meta(c).get("name") or c, "close": f["close"],
+                                 "pct": (close / prev - 1) * 100, "ret": (f[f"p{h}"] / f["close"] - 1) * 100,
+                                 "p": f[f"p{h}"], "lo": f[f"lo{h}"], "hi": f[f"hi{h}"], "dir": f.get(f"dir{h}", 0),
+                                 "model": used, "ok5": met.get("ok5"), "dirhit": met.get("dir"),
+                                 "high_vol": bool(f.get("high_vol")), "watch": c in watch})
+                rows.sort(key=lambda r: -r["ret"])
+                rank[mk]["lists"][f"{m}_{h}"] = rows[:top]
+                need |= {r["code"] for r in rows[:top]}
+    return clean(rank), need
+
+
 # ================================================================ 主程式
 def build(repo: str = "") -> Path:
     cfg = S.load_cfg()
@@ -289,8 +336,14 @@ def build(repo: str = "") -> Path:
         if f.is_file():
             shutil.copy(f, SITE / f.name)
 
+    try:
+        rank, need = build_ranking(codes)
+    except Exception as e:
+        print(f"  排行榜略過：{e}")
+        rank, need = {}, set()
+    extra = [c for c in sorted(need) if c not in codes]       # 排行榜上、但不在自選股的也要有明細頁
     stocks = {}
-    for c in codes:
+    for c in codes + extra:
         try:
             p = stock_payload(c)
         except Exception as e:                       # 單檔失敗不影響整個網站
@@ -311,6 +364,8 @@ def build(repo: str = "") -> Path:
                     for h in p["states"]},
         })
         print(f"  ✓ {c}")
+    for c in extra:                                              # 不在自選股的只留明細頁，不放進首頁清單
+        stocks.pop(c, None)
 
     now = dt.datetime.now()
     market = {}
@@ -325,7 +380,7 @@ def build(repo: str = "") -> Path:
         except Exception as e:
             print(f"  大盤環境 {sym} 略過：{e}")
     summary = {"updated": now.strftime("%Y-%m-%d %H:%M"), "repo": repo, "lists": cfg["watchlists"], "market": market,
-               "stocks": stocks, "model_names": P.MODEL_NAME}
+               "rank": rank, "stocks": stocks, "model_names": P.MODEL_NAME}
     (SITE / "data" / "summary.json").write_text(json.dumps(clean(summary), ensure_ascii=False), encoding="utf-8")
     (SITE / ".nojekyll").write_text("")
     print(f"網站已產生：{SITE}（{len(codes)} 檔，{sum(f.stat().st_size for f in SITE.rglob('*') if f.is_file()) / 1e6:.1f} MB）")

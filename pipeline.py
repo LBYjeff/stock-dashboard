@@ -179,7 +179,12 @@ def pick_champion(ms: dict) -> str:
 
 
 # ================================================================ 單檔更新
-def update(code: str, token: str = "", markets_done: set | None = None, log=print) -> dict:
+LITE_SINCE, LITE_REC_DAYS = "2012-01-01", 600     # 排行榜股票池（非自選股）的精簡模式
+
+
+def update(code: str, token: str = "", markets_done: set | None = None, log=print, lite: bool = False) -> dict:
+    """lite=True：排行榜股票池用的精簡模式——價格只存 2012 年起、不抓個股法人／融資（省 FinMind 查詢次數）、
+    規則紀錄 600 日、不做大盤籌碼 A/B 比較。預測模型與自選股完全相同。"""
     t0 = time.time()
     meta = ensure_meta(code, token)
     mtype = meta.get("mtype")
@@ -192,20 +197,21 @@ def update(code: str, token: str = "", markets_done: set | None = None, log=prin
                 log(f"  {sym} 略過：{e}")
             if markets_done is not None:
                 markets_done.add(sym)
-    n_new = S.update_prices(code, mtype, token)
+    n_new = S.update_prices(code, mtype, token, since=LITE_SINCE if lite else None)
     px = S.load_prices(code)
     if px.empty or len(px) < 160:
         S.set_meta(code, last_update=S._now())
         return {"code": code, "ok": False, "msg": "資料不足或代號錯誤"}
-    for fn, args in ((S.update_inst, (code, token)), (S.update_margin, (code, token)),
-                     (S.update_divs, (code, mtype))):
+    jobs = ((S.update_divs, (code, mtype)),) if lite else \
+        ((S.update_inst, (code, token)), (S.update_margin, (code, token)), (S.update_divs, (code, mtype)))
+    for fn, args in jobs:
         try:
             fn(*args)
         except Exception as e:                       # 籌碼/股利抓不到不影響主流程
             log(f"  {code} {fn.__name__} 略過：{e}")
 
     # 2) 規則
-    S.update_rule_rec(code, px, lambda d: T.analyze(d, light=True))
+    S.update_rule_rec(code, px, lambda d: T.analyze(d, light=True), days=LITE_REC_DAYS if lite else S.REC_DAYS)
     base = S.load_rule_rec(code, px)
 
     reg = regime_for(msym)
@@ -223,7 +229,7 @@ def update(code: str, token: str = "", markets_done: set | None = None, log=prin
     for h in EV.HS:
         y = ml.labels(px, h)
         res = ml.walk_forward(feat[ml.feature_cols(feat, h, chips=False)], y, h)
-        if not macro.empty and feat[ml.CHIP_COLS].notna().sum().min() > 300:
+        if not lite and not macro.empty and feat[ml.CHIP_COLS].notna().sum().min() > 300:
             # 大盤籌碼特徵：同一檔股票各訓練一次「有／沒有」，樣本外比較後才決定要不要用
             res_c = ml.walk_forward(feat[ml.feature_cols(feat, h, chips=True)], y, h)
             a = ml.oos_score(res, y) if res else {"dir": np.nan, "ic": np.nan}
@@ -314,9 +320,12 @@ def update(code: str, token: str = "", markets_done: set | None = None, log=prin
             "champion": {h: S.load_state(code, h).get("champion") for h in EV.HS}}
 
 
-def update_many(codes: list[str], token: str = "", progress=None, log=print) -> list[dict]:
-    """progress(i, n, code)：給畫面顯示進度。"""
+def update_many(codes: list[str], token: str = "", progress=None, log=print, lite_codes=(),
+                deadline: float | None = None) -> list[dict]:
+    """progress(i, n, code)：給畫面顯示進度。lite_codes：用精簡模式更新的股票。
+    deadline：time.time() 的截止時間，超過就停止（剩下的下次再更新）。"""
     out, done = [], set()
+    lite_codes = set(lite_codes)
     with S.LOCK:
         if any(D.is_tw(c) for c in codes):
             try:
@@ -325,10 +334,14 @@ def update_many(codes: list[str], token: str = "", progress=None, log=print) -> 
             except Exception as e:
                 log(f"大盤籌碼資料略過：{e}")
         for i, c in enumerate(codes):
+            if deadline and time.time() > deadline:
+                log(f"已達本次更新時間上限，剩下 {len(codes) - i} 檔留到下次更新")
+                out += [{"code": x, "ok": False, "msg": "時間上限，下次更新", "skipped": True} for x in codes[i:]]
+                break
             if progress:
                 progress(i, len(codes), c)
             try:
-                out.append(update(c, token, done, log))
+                out.append(update(c, token, done, log, lite=c in lite_codes))
             except Exception as e:
                 log(f"{c} 更新失敗：{e}")
                 out.append({"code": c, "ok": False, "msg": str(e)})

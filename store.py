@@ -71,6 +71,25 @@ def _dstr(d) -> str:
 
 
 # ================================================================ 自選股清單
+UNIVERSE = APP_DIR / "universe.json"
+
+
+def load_universe() -> dict:
+    """排行榜股票池 {"台股": [...], "美股": [...]}；檔案不存在時回傳空的。"""
+    try:
+        u = json.loads(UNIVERSE.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {"台股": [], "美股": []}
+    return {k: list(dict.fromkeys(str(x).strip().upper() for x in u.get(k, []) if str(x).strip()))
+            for k in ("台股", "美股")}
+
+
+def vacuum() -> None:
+    c = sqlite3.connect(DB)
+    c.execute("VACUUM")
+    c.close()
+
+
 DEFAULT_LISTS = {"我的自選": ["2330", "2454", "0050", "NVDA", "TSM", "AAPL"]}
 
 
@@ -132,11 +151,13 @@ def _write_prices(code: str, df: pd.DataFrame, replace_all: bool = False) -> Non
         c.executemany("INSERT OR REPLACE INTO prices VALUES (?,?,?,?,?,?,?)", rows)
 
 
-def update_prices(code: str, mtype: str | None = None, token: str = "") -> int:
-    """增量更新；若發現歷史價格被調整（分割/減資），整段重抓。回傳新增筆數。"""
+def update_prices(code: str, mtype: str | None = None, token: str = "", since: str | None = None) -> int:
+    """增量更新；若發現歷史價格被調整（分割/減資），整段重抓。回傳新增筆數。
+    since：只保留這天以後的資料（排行榜股票池用，控制資料庫大小）。"""
     old = load_prices(code)
+    cut = (lambda d: d[d.index >= pd.Timestamp(since)] if since and not d.empty else d)
     if old.empty:
-        new = D.price_history(code, "max", mtype, token)
+        new = cut(D.price_history(code, "max", mtype, token))
         if new.empty:
             return 0
         _write_prices(code, new, replace_all=True)
@@ -150,7 +171,7 @@ def update_prices(code: str, mtype: str | None = None, token: str = "") -> int:
     if len(overlap):
         diff = (new.loc[overlap, "Close"] / old.loc[overlap, "Close"] - 1).abs().max()
         if diff > 0.01:
-            full = D.price_history(code, "max", mtype, token)
+            full = cut(D.price_history(code, "max", mtype, token))
             if not full.empty:
                 _write_prices(code, full, replace_all=True)
                 return len(full)
