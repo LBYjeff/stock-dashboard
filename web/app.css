@@ -121,3 +121,9 @@ input.field{width:100%;min-height:44px;border:0;border-radius:10px;background:va
   background:var(--card);color:var(--label);padding:10px 16px;border-radius:14px;font-size:15px;box-shadow:0 8px 24px rgba(0,0,0,.18);
   transition:all .3s;max-width:90vw;text-align:center}
 .toast.show{transform:translate(-50%,0);opacity:1}
+
+/* 排行榜名次 */
+.rk{flex:0 0 26px;height:26px;border-radius:13px;background:var(--fill);color:var(--label2);font-size:14px;font-weight:700;
+  display:flex;align-items:center;justify-content:center}
+.rk.top{background:var(--blue);color:#fff}
+.tabbar a{font-size:10px}

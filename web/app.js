@@ -8,17 +8,18 @@ const LS = {
   set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* 私密模式等情況忽略 */ } },
 };
 const MODEL = { champion: "最佳模型", rule: "規則模型", calib: "校正模型", ml: "機器學習" };
-const TABS = { watch: "自選股", predict: "預測", review: "檢討", settings: "設定" };
+const TABS = { watch: "自選股", rank: "排行", predict: "預測", review: "檢討", settings: "設定" };
 const ICON = {
   watch: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="4.5" cy="6" r="1.2" fill="currentColor"/><circle cx="4.5" cy="12" r="1.2" fill="currentColor"/><circle cx="4.5" cy="18" r="1.2" fill="currentColor"/><path d="M9 6h11M9 12h11M9 18h11"/></svg>',
   predict: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 19h18"/><path d="M4 15l5-5 4 3 7-7"/><path d="M15 6h5v5"/></svg>',
   review: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4" width="14" height="17" rx="2.5"/><path d="M9 4.5h6v2.5H9z"/><path d="M8.5 13.5l2.3 2.3 4.7-4.8"/></svg>',
+  rank: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8M12 17v4"/><path d="M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M7 6H4.5a2.5 2.5 0 0 0 2.6 4M17 6h2.5a2.5 2.5 0 0 1-2.6 4"/></svg>',
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M2.8 12h2.6M18.6 12h2.6M5.5 5.5l1.8 1.8M16.7 16.7l1.8 1.8M5.5 18.5l1.8-1.8M16.7 7.3l1.8-1.8"/></svg>',
 };
 
 let SUM = null;
 const CACHE = {};
-const UI = { market: "全部", view: "走勢", range: "6月", rvModel: "最佳", rvSrc: "回溯驗證" };
+const UI = { market: "全部", view: "走勢", range: "6月", rvModel: "最佳", rvSrc: "回溯驗證", rkMkt: "台股", rkH: "5 日" };
 let wl = LS.get("wl", "");
 let model = LS.get("model", "champion");
 
@@ -149,9 +150,9 @@ function pageWatch() {
   return h + section(null, rows.join(""), `點股票看明細・趨勢標籤為「${MODEL[model]}」的 5／20 日預測・紅漲綠跌`);
 }
 
-async function pageStock(c) {
+async function pageStock(c, back = ["自選股", "#/watch"]) {
   const d = await stock(c);
-  let h = nav(d.name, `${c}・${d.tw ? "台股" : "美股"}`, ["自選股", "#/watch"], false);
+  let h = nav(d.name, `${c}・${d.tw ? "台股" : "美股"}`, back, false);
   h += `<div class="hero"><span class="p">${num(d.close)}</span><span class="c" style="color:${col(d.chg)}">${sgn(d.chg)}（${sgn(d.pct)}%）</span>
         <div class="note" style="padding:0">資料日期 ${esc(d.date)}</div></div>`;
   h += seg("view", ["走勢", "籌碼", "高低點"], UI.view);
@@ -204,8 +205,42 @@ async function pageStock(c) {
     cell("查看預測檢討", "", { link: `#/review/${encodeURIComponent(c)}` }));
   if (codes().includes(c)) {
     h += section(null, cell(`<span style="color:var(--red)">從「${esc(wl)}」移除</span>`, "", { attrs: `data-remove="${esc(c)}"`, chev: false }));
+  } else {
+    h += section(null, cell(`<span style="color:var(--blue)">＋ 加入自選股</span>`, "", { attrs: `data-addcode="${esc(c)}"`, chev: false }));
   }
   return [h, after];
+}
+
+// ---------------------------------------------------------------- 排行
+function pageRank() {
+  const R = SUM.rank || {};
+  const mk = R[UI.rkMkt] ? UI.rkMkt : (Object.keys(R)[0] || UI.rkMkt);
+  const r = R[mk];
+  let h = nav("排行", r ? `${mk}・從 ${r.valid} 檔中篩選・資料 ${r.date}` : "預估漲幅前 10 名");
+  h += seg("rkMkt", ["台股", "美股"], mk) + seg("rkH", ["5 日", "20 日"], UI.rkH);
+  if (!r) return h + `<div class="empty">排行榜會在下一次雲端更新後出現（第一次需要下載股票池資料，可能要跑好幾次才會完整）。</div>`;
+  const hz = UI.rkH === "5 日" ? 5 : 20;
+  const list = (r.lists || {})[`${model}_${hz}`] || [];
+  if (!list.length) return h + `<div class="empty">「${MODEL[model]}」目前沒有可排名的預測。</div>`;
+  const rows = list.map((x, i) => {
+    const hit = x.ok5 == null ? "—" : pct(x.ok5);
+    const tags = `<span class="tag">${esc(MODEL[x.model] || x.model)}</span><span class="tag">命中 ${hit}</span>` +
+      (x.dirhit != null ? `<span class="tag">方向 ${pct(x.dirhit)}</span>` : "") +
+      (x.watch ? '<span class="tag best">自選</span>' : "") +
+      (x.high_vol ? '<span class="tag" style="color:var(--orange)">⚡高波動</span>' : "");
+    return `<a class="cell" href="#/rank/${encodeURIComponent(x.code)}" style="min-height:70px">
+      <div class="rk ${i < 3 ? "top" : ""}">${i + 1}</div>
+      <div class="k"><div class="sym">${esc(x.code)} <span class="nm" style="display:inline">${esc(x.name)}</span></div>
+        <div style="margin-top:3px">${tags}</div></div>
+      <div style="text-align:right"><div class="px" style="color:${col(x.ret)};font-weight:700">${sgn(x.ret, 1)}%</div>
+        <div style="font-size:13px;color:var(--label2)">目標 ${num(x.p)}</div>
+        <div style="font-size:12px;color:var(--label3)">現價 ${num(x.close)}（${sgn(x.pct, 1)}%）</div></div></a>`;
+  });
+  h += section(`${MODEL[model]}・${hz} 日預估漲幅前 10 名`, rows.join(""),
+    `排名依「預估價 ÷ 現價 − 1」由高到低。命中＝該模型近 250 個交易日落差 ≤ 5% 的比例，方向＝看漲看跌猜對的比例；` +
+    `命中率低的股票，排名再前面也只能參考。股票池：${UI.rkMkt === "台股" ? "台灣50＋中型100" : "Nasdaq-100＋道瓊 30"}，加上你的自選股。` +
+    `要換模型到「設定 → 預測模型」。⚠️ 排行不是買賣建議。`);
+  return h;
 }
 
 // ---------------------------------------------------------------- 預測
@@ -424,7 +459,7 @@ function toast(t) {
 }
 const setMsg = (ov, t, cls = "") => { const m = ov.querySelector(".msg"); m.className = "msg " + cls; m.textContent = t; };
 
-function openAdd() {
+function openAdd(prefill = "") {
   if (!SUM.repo) { toast("這個網頁沒有連結 GitHub 儲存庫"); return; }
   if (!GH.token()) { openToken(true); return; }
   const lists = Object.keys(SUM.lists);
@@ -434,6 +469,7 @@ function openAdd() {
       `<option ${n === wl ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>` : ""}
     <div class="msg">加入後，雲端會下載資料並訓練這檔的模型，約 10～15 分鐘後出現在清單。</div>`);
   const inp = ov.querySelector("#addcode");
+  inp.value = prefill;
   setTimeout(() => inp.focus(), 300);
   const go = async () => {
     const cs = parseCodes(inp.value);
@@ -531,6 +567,7 @@ async function render(keepScroll = false) {
   let out;
   try {
     if (tab === "watch") out = code ? await pageStock(code) : pageWatch();
+    else if (tab === "rank") out = code ? await pageStock(code, ["排行", "#/rank"]) : pageRank();
     else if (tab === "predict") out = code ? await pagePredictStock(code) : pagePredict();
     else if (tab === "review") out = await pageReview(code);
     else out = pageSettings();
@@ -553,6 +590,8 @@ document.addEventListener("click", (e) => {
   if (m) { model = m.dataset.model; LS.set("model", model); render(true); return; }
   const a = e.target.closest("[data-act]");
   if (a && a.dataset.act === "add") { openAdd(); return; }
+  const ad = e.target.closest("[data-addcode]");
+  if (ad) { openAdd(ad.dataset.addcode); return; }
   if (a && a.dataset.act === "token") { openToken(); return; }
   const r = e.target.closest("[data-remove]");
   if (r) confirmRemove(r.dataset.remove);
