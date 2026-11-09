@@ -319,6 +319,8 @@ def build(repo: str = "") -> Path:
             if any(D.market_symbol(c) == sym for c in codes):
                 sm = RG.summary(P.regime_for(sym))
                 if sm:
+                    if sym == "^TWII":
+                        sm["chips"] = RG.chip_summary(S.load_macro())
                     market[nm] = sm
         except Exception as e:
             print(f"  大盤環境 {sym} 略過：{e}")

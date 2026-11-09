@@ -29,6 +29,10 @@ FEATURE_NAMES = {
     "mkt_bear_div": "大盤月線空頭背離", "mkt_vol_ratio": "大盤波動度暴增", "mkt_high_vol": "大盤高波動日",
     "us_ret1": "前一晚美股 S&P 500", "sox_ret1": "前一晚費城半導體", "tsm_ret1": "前一晚台積電 ADR",
     "tsm_ret5": "台積電 ADR 近 5 日", "vix": "VIX 恐慌指數", "vix_chg5": "VIX 5 日變化",
+    "chip_fx5": "外資大盤 5 日買賣超", "chip_fx20": "外資大盤 20 日買賣超", "chip_inst5": "三大法人大盤 5 日買賣超",
+    "chip_txoi": "外資台指期淨未平倉", "chip_txoi_chg5": "外資台指期淨單 5 日變化",
+    "chip_margin5": "大盤融資餘額 5 日增減", "chip_margin20": "大盤融資餘額 20 日增減",
+    "chip_usd5": "台幣匯率 5 日變化（正＝貶值）", "chip_usd20": "台幣匯率 20 日變化",
     **{f"sub_{k}": f"規則：{k}" for k in T.KINDS},
 }
 
@@ -95,6 +99,30 @@ def build_features(px: pd.DataFrame, mkt: pd.DataFrame | None, inst: pd.DataFram
         f[key] = s_.pct_change(fill_method=None) if s_ is not None else 0.0
     s_ = us_close("TSM")
     f["tsm_ret5"] = s_.pct_change(5, fill_method=None) if s_ is not None else 0.0
+    # ---- 大盤層級籌碼（台股）：都換成「相對近一年的 Z 分數」，不同年代的金額大小才能比較
+    mac = ext.get("macro")
+
+    def z(x, win=250):
+        return (x - x.rolling(win, min_periods=60).mean()) / x.rolling(win, min_periods=60).std()
+    if mac is not None and not mac.empty:
+        m = mac.reindex(mac.index.union(px.index)).sort_index()
+        g = lambda k: m[k] if k in m else pd.Series(np.nan, index=m.index)
+        fx, inst_ = g("tw_foreign_net").fillna(0), g("tw_inst_net").fillna(0)
+        oi, mg_, usd = g("tx_foreign_oi").ffill(), g("tw_margin_money").ffill(), g("usdtwd").ffill()
+        cf = pd.DataFrame({
+            "chip_fx5": z(fx.rolling(5).sum()), "chip_fx20": z(fx.rolling(20).sum()),
+            "chip_inst5": z(inst_.rolling(5).sum()),
+            "chip_txoi": z(oi), "chip_txoi_chg5": z(oi.diff(5)),
+            "chip_margin5": mg_.pct_change(5, fill_method=None), "chip_margin20": mg_.pct_change(20, fill_method=None),
+            "chip_usd5": usd.pct_change(5, fill_method=None), "chip_usd20": usd.pct_change(20, fill_method=None),
+        }, index=m.index)
+        cf = cf.reindex(px.index, method="ffill")
+        for k in CHIP_COLS:
+            f[k] = cf[k]
+    else:
+        for k in CHIP_COLS:
+            f[k] = 0.0
+
     s_ = us_close("^VIX")
     f["vix"] = s_ if s_ is not None else 0.0
     f["vix_chg5"] = s_.pct_change(5, fill_method=None) if s_ is not None else 0.0
@@ -144,11 +172,24 @@ def build_features(px: pd.DataFrame, mkt: pd.DataFrame | None, inst: pd.DataFram
 US_COLS = ["us_ret1", "sox_ret1", "tsm_ret1", "tsm_ret5", "vix", "vix_chg5"]
 REG_COLS = ["mkt_regime", "mkt_mrsi6", "mkt_wrsi6", "mkt_bear_div", "mkt_vol_ratio", "mkt_high_vol"]
 NEW_TECH = ["rsi6", "pv_div"]
+CHIP_COLS = ["chip_fx5", "chip_fx20", "chip_inst5", "chip_txoi", "chip_txoi_chg5",
+             "chip_margin5", "chip_margin20", "chip_usd5", "chip_usd20"]
 EXCLUDE = {5: set(), 20: set(REG_COLS + NEW_TECH)}   # 20 日：大盤格局交給規則濾網，ML 只加美股特徵
 
 
-def feature_cols(feat: pd.DataFrame, h: int) -> list[str]:
-    return [c for c in feat.columns if c not in EXCLUDE.get(h, set())]
+def feature_cols(feat: pd.DataFrame, h: int, chips: bool = True) -> list[str]:
+    ex = EXCLUDE.get(h, set()) | (set() if chips else set(CHIP_COLS))
+    return [c for c in feat.columns if c not in ex]
+
+
+def oos_score(res: dict, y: pd.Series, days: int = 250) -> dict:
+    """樣本外成績：方向命中率、IC（最近 days 天、答案已揭曉的部分）。"""
+    d = res["oos"][["ml"]].join(y.rename("y")).dropna().iloc[-days:]
+    if len(d) < 60:
+        return {"n": len(d), "dir": np.nan, "ic": np.nan}
+    m = d["ml"].abs() >= 0.25
+    hit = float((np.sign(d.loc[m, "ml"]) == np.sign(d.loc[m, "y"])).mean()) if m.sum() else np.nan
+    return {"n": len(d), "dir": hit, "ic": float(np.corrcoef(d["ml"], d["y"])[0, 1])}
 
 
 CORE = ["ret60", "bias60", "atr_pct", "vol_ratio", "rsi14", "dist_hi250", "ma60_slope"]

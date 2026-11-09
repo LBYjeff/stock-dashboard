@@ -217,10 +217,22 @@ def update(code: str, token: str = "", markets_done: set | None = None, log=prin
     # 4) 機器學習
     mkt = S.load_prices(msym)
     inst, mg = S.load_inst(code), S.load_margin(code)
-    feat = ml.build_features(px, mkt, inst, mg, base, {"regime": reg, "us": us_ext()})
-    ml_res, oos = {}, {}
+    macro = S.load_macro() if D.is_tw(code) else pd.DataFrame()
+    feat = ml.build_features(px, mkt, inst, mg, base, {"regime": reg, "us": us_ext(), "macro": macro})
+    ml_res, oos, chip_ab = {}, {}, {}
     for h in EV.HS:
-        res = ml.walk_forward(feat[ml.feature_cols(feat, h)], ml.labels(px, h), h)
+        y = ml.labels(px, h)
+        res = ml.walk_forward(feat[ml.feature_cols(feat, h, chips=False)], y, h)
+        if not macro.empty and feat[ml.CHIP_COLS].notna().sum().min() > 300:
+            # 大盤籌碼特徵：同一檔股票各訓練一次「有／沒有」，樣本外比較後才決定要不要用
+            res_c = ml.walk_forward(feat[ml.feature_cols(feat, h, chips=True)], y, h)
+            a = ml.oos_score(res, y) if res else {"dir": np.nan, "ic": np.nan}
+            b = ml.oos_score(res_c, y) if res_c else {"dir": np.nan, "ic": np.nan}
+            gain = np.nan_to_num(b["ic"] - a["ic"]) + np.nan_to_num(b["dir"] - a["dir"])
+            use = bool(res_c) and bool(gain > 0.01)
+            chip_ab[h] = {"without": a, "with": b, "used": use}
+            if use:
+                res = res_c
         if res:
             ml_res[h] = res
             oos[h] = res["oos"]
@@ -236,7 +248,7 @@ def update(code: str, token: str = "", markets_done: set | None = None, log=prin
         champ = pick_champion(ms)
         st = {"champion": champ, "metrics": ms,
               "calib": cal.get(h), "n_train": ml_res[h]["n_train"] if h in ml_res else 0,
-              "resid_sd": cal_ml[f"sd{h}"]}
+              "resid_sd": cal_ml[f"sd{h}"], "chip_ab": chip_ab.get(h)}
         if h in ml_res:
             imp = ml_res[h]["importance"].head(10)
             st["importance"] = [{"key": k, "name": ml.FEATURE_NAMES.get(k, k), "w": float(v),
@@ -306,6 +318,12 @@ def update_many(codes: list[str], token: str = "", progress=None, log=print) -> 
     """progress(i, n, code)：給畫面顯示進度。"""
     out, done = [], set()
     with S.LOCK:
+        if any(D.is_tw(c) for c in codes):
+            try:
+                n = S.update_macro(token, log)
+                log(f"大盤籌碼資料：新增 {n} 筆")
+            except Exception as e:
+                log(f"大盤籌碼資料略過：{e}")
         for i, c in enumerate(codes):
             if progress:
                 progress(i, len(codes), c)
@@ -371,6 +389,12 @@ def model_section(states: dict) -> str:
             L.append(f"- {h} 日・{MODEL_NAME[m]}：落差≤5% {EV.pct(v['ok5'])}（股價不動 {EV.pct(v['naive'])}）、"
                      f"落在區間 {EV.pct(v['band'])}、方向命中 {EV.pct(v.get('dir'))}（{v.get('n_dir', 0)} 次）、IC {v['ic']:+.3f}")
         L.append(f"- **{h} 日目前採用：{MODEL_NAME.get(st.get('champion'), '-')}**")
+        ab = st.get("chip_ab")
+        if ab:
+            w, wo = ab["with"], ab["without"]
+            L.append(f"  - 大盤籌碼特徵：{'✅ 採用' if ab['used'] else '❌ 不採用'}"
+                     f"（樣本外方向命中 {EV.pct(wo.get('dir'))} → {EV.pct(w.get('dir'))}，"
+                     f"IC {wo.get('ic') or 0:+.3f} → {w.get('ic') or 0:+.3f}）")
         imp = st.get("importance") or []
         if imp:
             L.append(f"  - 機器學習最看重：" + "、".join(

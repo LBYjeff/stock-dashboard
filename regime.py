@@ -132,3 +132,35 @@ def summary(reg: pd.DataFrame) -> dict | None:
             "range_pct": None if np.isnan(x["range_pct"]) else float(x["range_pct"]),
             "vix": None if np.isnan(x["vix"]) else float(x["vix"]),
             "high_vol": bool(x["high_vol"]), "notes": notes}
+
+
+def chip_summary(mac: pd.DataFrame) -> list[dict] | None:
+    """大盤籌碼摘要（給畫面）：外資現貨、外資台指期淨單、大盤融資、台幣匯率。"""
+    if mac is None or mac.empty:
+        return None
+    out = []
+
+    def last(k):
+        s = mac[k].dropna() if k in mac else pd.Series(dtype=float)
+        return s
+
+    s = last("tw_foreign_net")
+    if len(s) >= 5:
+        out.append({"name": "外資現貨買賣超", "value": f"{s.iloc[-1]:+,.0f} 億", "sub": f"5 日累計 {s.iloc[-5:].sum():+,.0f} 億",
+                    "dir": int(np.sign(s.iloc[-5:].sum())), "date": f"{s.index[-1]:%m/%d}"})
+    s = last("tx_foreign_oi")
+    if len(s) >= 6:
+        out.append({"name": "外資台指期淨未平倉", "value": f"{s.iloc[-1]:+,.0f} 口", "sub": f"5 日變化 {s.iloc[-1] - s.iloc[-6]:+,.0f} 口",
+                    "dir": int(np.sign(s.iloc[-1])), "date": f"{s.index[-1]:%m/%d}"})
+    s = last("tw_margin_money")
+    if len(s) >= 6:
+        ch = s.iloc[-1] / s.iloc[-6] - 1
+        out.append({"name": "大盤融資餘額", "value": f"{s.iloc[-1]:,.0f} 億", "sub": f"5 日 {ch:+.1%}"
+                    + ("（融資減肥中）" if ch < -0.03 else "（融資增加）" if ch > 0.03 else ""),
+                    "dir": 0, "date": f"{s.index[-1]:%m/%d}"})
+    s = last("usdtwd")
+    if len(s) >= 6:
+        ch = s.iloc[-1] / s.iloc[-6] - 1
+        out.append({"name": "美元兌台幣", "value": f"{s.iloc[-1]:.3f}", "sub": f"5 日 {ch:+.2%}・" + ("台幣貶值" if ch > 0 else "台幣升值"),
+                    "dir": -int(np.sign(ch)), "date": f"{s.index[-1]:%m/%d}"})
+    return out or None

@@ -48,6 +48,15 @@ GitHub Actions 每天自動更新資料、重新訓練模型，產生 iOS 風格
   （回測顯示「強制觀望」反而降低命中率，所以改成提醒＋放寬區間）
 - 預測分頁頂端顯示台股／美股的大盤環境
 
+## 🏦 第四階段：台股大盤籌碼（FinMind 免費資料集）
+- 大盤三大法人買賣超（TaiwanStockTotalInstitutionalInvestors）、外資台指期淨未平倉（TaiwanFuturesInstitutionalInvestors, TX）、
+  大盤融資融券（TaiwanStockTotalMarginPurchaseShortSale）、美元兌台幣（TaiwanExchangeRate, USD）
+- 存在 market.db 的 macro 表；第一次從 2015 年起補抓（約 52 次查詢），之後每天 4 次
+- 機器學習新增 9 個籌碼特徵（換算成相對近一年的 Z 分數）；**每檔台股各自前推驗證「有／沒有」籌碼特徵，較準才採用**，
+  結果寫在初報告「三種模型比較」
+- 融資維持率（TaiwanTotalExchangeMarginMaintenance）為 FinMind 贊助會員限定，改用大盤融資餘額增減代替
+- 台股預測以台灣時間 06:30 那次更新最完整（含前一晚美股與台積電 ADR）；16:30 那次為初估
+
 ## 💾 資料都存在本機
 - `market.db`（SQLite）：日 K、大盤、法人、融資券、股利、各模型預測與實際紀錄，每天只補抓新的部分
 - `config.json`：自選股清單；`calib.json`：權重校正結果

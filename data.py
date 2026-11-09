@@ -326,3 +326,66 @@ def dividends(code: str, market_type: str | None = None) -> pd.Series:
                 idx = idx.tz_localize(None)
             return pd.Series(s.values.astype(float), index=idx.normalize()).sort_index()
     return pd.Series(dtype=float)
+
+
+# ---------------------------------------------------------------- 大盤層級籌碼（FinMind，免費資料集）
+def _num(df, col):
+    return pd.to_numeric(df[col], errors="coerce")
+
+
+def tw_total_inst(start: str, end: str, token: str = "") -> pd.DataFrame:
+    """大盤三大法人買賣超（億元）：外資（含外資自營商）、合計。"""
+    df = finmind("TaiwanStockTotalInstitutionalInvestors", start=start, end=end, token=token)
+    if df.empty or not {"buy", "sell", "name", "date"} <= set(df.columns):
+        return pd.DataFrame()
+    df["net"] = (_num(df, "buy") - _num(df, "sell")) / 1e8
+    fx = df[df["name"].isin(["Foreign_Investor", "Foreign_Dealer_Self"])].groupby("date")["net"].sum()
+    tot = df[df["name"] != "total"].groupby("date")["net"].sum()
+    out = pd.DataFrame({"tw_foreign_net": fx, "tw_inst_net": tot})
+    out.index = pd.to_datetime(out.index)
+    return out
+
+
+def tx_foreign_oi(start: str, end: str, token: str = "") -> pd.DataFrame:
+    """台指期（TX）外資未平倉淨口數 = 多方未平倉 − 空方未平倉（負值＝淨空單）。"""
+    df = finmind("TaiwanFuturesInstitutionalInvestors", "TX", start=start, end=end, token=token)
+    need = {"institutional_investors", "long_open_interest_balance_volume", "short_open_interest_balance_volume"}
+    if df.empty or not need <= set(df.columns):
+        return pd.DataFrame()
+    f = df[df["institutional_investors"].astype(str).str.contains("外資")].copy()
+    f["net"] = _num(f, "long_open_interest_balance_volume") - _num(f, "short_open_interest_balance_volume")
+    s = f.groupby("date")["net"].sum()
+    s.index = pd.to_datetime(s.index)
+    return pd.DataFrame({"tx_foreign_oi": s})
+
+
+def tw_total_margin(start: str, end: str, token: str = "") -> pd.DataFrame:
+    """大盤融資餘額（億元）、融資餘額（張）、融券餘額（張）。"""
+    df = finmind("TaiwanStockTotalMarginPurchaseShortSale", start=start, end=end, token=token)
+    if df.empty or not {"TodayBalance", "name", "date"} <= set(df.columns):
+        return pd.DataFrame()
+    df["v"] = _num(df, "TodayBalance")
+    p = df.pivot_table(index="date", columns="name", values="v", aggfunc="last")
+    out = pd.DataFrame(index=pd.to_datetime(p.index))
+    if "MarginPurchaseMoney" in p:
+        out["tw_margin_money"] = p["MarginPurchaseMoney"].values / 1e8
+    if "MarginPurchase" in p:
+        out["tw_margin_lots"] = p["MarginPurchase"].values
+    if "ShortSale" in p:
+        out["tw_short_lots"] = p["ShortSale"].values
+    return out
+
+
+def usd_twd(start: str, end: str, token: str = "") -> pd.DataFrame:
+    """美元兌台幣（台灣銀行即期賣出，-99 為缺值；數字變大＝台幣貶值）。"""
+    df = finmind("TaiwanExchangeRate", "USD", start=start, end=end, token=token)
+    if df.empty or "date" not in df:
+        return pd.DataFrame()
+    v = _num(df, "spot_sell").where(lambda x: x > 0)
+    if v.isna().all() and "cash_sell" in df:
+        v = _num(df, "cash_sell").where(lambda x: x > 0)
+    s = pd.Series(v.values, index=pd.to_datetime(df["date"])).dropna()
+    return pd.DataFrame({"usdtwd": s[~s.index.duplicated(keep="last")]})
+
+
+MACRO_FETCHERS = (tw_total_inst, tx_foreign_oi, tw_total_margin, usd_twd)

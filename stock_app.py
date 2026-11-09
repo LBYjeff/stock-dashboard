@@ -530,6 +530,11 @@ def page_predict():
         cells.append(cell(nm, f'<b style="color:{colr}">{x["label"]}</b>', sub=sub))
     if cells:
         section("大盤環境", "20 日預測會依大盤格局調整：逆勢訊號打折。", "".join(cells))
+    chips = RG.chip_summary(S.load_macro()) if any(D.is_tw(c) for c in codes) else None
+    if chips:
+        section("台股大盤籌碼", "機器學習會為每檔台股分別測試這些籌碼資料，有讓預測更準才採用。",
+                "".join(cell(x["name"], f'<span style="color:{color_of(x["dir"])}">{x["value"]}</span>',
+                             sub=f'{x["sub"]}・{x["date"]}') for x in chips))
     rows = []
     for c in codes:
         f = _fc(c, stamp(c)).get(model)

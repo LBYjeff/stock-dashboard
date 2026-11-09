@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS inst (code TEXT, date TEXT, foreign_ REAL, trust REAL
   PRIMARY KEY (code, date));
 CREATE TABLE IF NOT EXISTS margin (code TEXT, date TEXT, mbal REAL, mchg REAL, mlimit REAL, sbal REAL, schg REAL,
   PRIMARY KEY (code, date));
+CREATE TABLE IF NOT EXISTS macro (key TEXT, date TEXT, value REAL, PRIMARY KEY (key, date));
 CREATE TABLE IF NOT EXISTS divs (code TEXT, date TEXT, amount REAL, PRIMARY KEY (code, date));
 CREATE TABLE IF NOT EXISTS meta (code TEXT PRIMARY KEY, name TEXT, mtype TEXT, last_update TEXT);
 CREATE TABLE IF NOT EXISTS rule_rec (code TEXT, date TEXT, data TEXT, PRIMARY KEY (code, date));
@@ -402,6 +403,8 @@ def load_live(code: str, model: str, px: pd.DataFrame) -> pd.DataFrame:
 
 
 def _json_default(o):
+    if isinstance(o, np.bool_):
+        return bool(o)
     if isinstance(o, (np.floating, np.integer)):
         return o.item()
     if isinstance(o, (pd.Timestamp, dt.date)):
@@ -413,3 +416,48 @@ def _json_default(o):
 
 def db_size() -> int:
     return DB.stat().st_size if DB.exists() else 0
+
+
+# ================================================================ 大盤層級籌碼（台股）
+MACRO_START = "2015-01-01"
+
+
+def update_macro(token: str = "", log=print) -> int:
+    """大盤三大法人、台指期外資未平倉、大盤融資券、USD/TWD。每個資料集各自從最後日期往後補，
+    第一次從 2015 年起、每次抓一年（避免單次查詢太大）。回傳新增筆數。"""
+    total = 0
+    today = pd.Timestamp.today().normalize()
+    for fn in D.MACRO_FETCHERS:
+        with conn() as c:
+            row = c.execute("SELECT MAX(date) FROM macro WHERE key LIKE ?", (_macro_prefix(fn),)).fetchone()
+        last = row[0] if row and row[0] else None
+        start = (pd.Timestamp(last) - pd.Timedelta(days=10)) if last else pd.Timestamp(MACRO_START)
+        while start <= today:
+            end = min(start + pd.Timedelta(days=365), today)
+            try:
+                df = fn(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), token)
+            except Exception as e:
+                log(f"  {fn.__name__} 略過：{e}")
+                df = pd.DataFrame()
+            if not df.empty:
+                rows = [(k, _dstr(d), float(v)) for k in df.columns for d, v in df[k].dropna().items()]
+                with conn() as c:
+                    c.executemany("INSERT OR REPLACE INTO macro VALUES (?,?,?)", rows)
+                total += len(rows)
+            start = end + pd.Timedelta(days=1)
+    return total
+
+
+def _macro_prefix(fn) -> str:
+    return {"tw_total_inst": "tw_%inst%", "tx_foreign_oi": "tx_%", "tw_total_margin": "tw_margin%",
+            "usd_twd": "usdtwd"}.get(fn.__name__, "%")
+
+
+def load_macro() -> pd.DataFrame:
+    with conn() as c:
+        df = pd.read_sql_query("SELECT key, date, value FROM macro", c)
+    if df.empty:
+        return pd.DataFrame()
+    out = df.pivot_table(index="date", columns="key", values="value", aggfunc="last")
+    out.index = pd.to_datetime(out.index)
+    return out.sort_index()
