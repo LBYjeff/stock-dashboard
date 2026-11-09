@@ -412,7 +412,7 @@ def label_of(score):
 
 
 def analyze(df: pd.DataFrame, light: bool = False, w5: dict | None = None,
-            w20: dict | None = None) -> dict | None:
+            w20: dict | None = None, regime: float | None = None) -> dict | None:
     """df：日 K（Open/High/Low/Close/Volume）。
     light=True 時只回傳分數與預估價（回測用，較快）。
     w5 / w20：各訊號類別的權重倍數（個股校正用），None = 預設。"""
@@ -448,9 +448,15 @@ def analyze(df: pd.DataFrame, light: bool = False, w5: dict | None = None,
     m20 = dict(DEFAULT_W20); m20.update(w20 or {})
     score = round(sum(sub[k] * m5[k] for k in KINDS), 2)
     score20 = round(sum(sub[k] * m20[k] for k in KINDS), 2)
+    raw5, raw20 = score, score20
+    if regime is not None and not np.isnan(regime):     # 大盤格局濾網：逆勢訊號打折
+        import regime as RG
+        score = round(float(RG.damp(score, regime, RG.DAMP5)), 2)
+        score20 = round(float(RG.damp(score20, regime, RG.DAMP20)), 2)
     pj = project(float(c[-1]), atr_v, score, score20, targets, m5.get("幅度", 1.0), m20.get("幅度", 1.0))
 
     out = {"score": score, "label": label_of(score), "score20": score20, "label20": label_of(score20),
+           "raw_score": raw5, "raw_score20": raw20,
            "close": float(c[-1]), "atr": atr_v, "sub": sub,
            "p5": pj["mid5"][-1], "lo5": pj["lo5"][-1], "hi5": pj["hi5"][-1],
            "p20": pj["mid20"][-1], "lo20": pj["lo20"][-1], "hi20": pj["hi20"][-1]}

@@ -17,12 +17,35 @@ import pandas as pd
 import data as D
 import evaluate as EV
 import ml
+import regime as RG
 import store as S
 import trend as T
 
 MODELS = ("rule", "calib", "ml")
 MODEL_NAME = {"rule": "規則模型", "calib": "校正模型", "ml": "機器學習", "champion": "最佳模型"}
 COMPARE_DAYS = 250
+EXTRA_US = ("^GSPC", "^SOX", "^VIX", "TSM")     # 前一晚美股、費半、VIX、台積電 ADR
+_reg_cache: dict = {}
+
+
+def regime_for(msym: str) -> pd.DataFrame:
+    """大盤環境（同一次更新中同一個指數只算一次）。"""
+    px = S.load_prices(msym)
+    key = (msym, str(px.index[-1]) if len(px) else "")
+    if key not in _reg_cache:
+        vix = S.load_prices("^VIX")
+        _reg_cache[key] = RG.market_regime(px, vix if not vix.empty else None)
+    return _reg_cache[key]
+
+
+def us_ext() -> dict:
+    return {k: S.load_prices(k) for k in EXTRA_US}
+
+
+def _reg_on(reg: pd.DataFrame | None, idx) -> pd.DataFrame | None:
+    if reg is None or reg.empty:
+        return None
+    return reg.reindex(idx, method="ffill")
 _tw_info_cache: dict = {}
 
 
@@ -51,19 +74,33 @@ def _dir_from_move(move_atr, thr=0.25):
     return np.where(np.abs(move_atr) >= thr, np.sign(move_atr), 0)
 
 
-def model_rec(base: pd.DataFrame, model: str, cal: dict, oos: dict) -> pd.DataFrame:
-    """把規則回溯紀錄 base 轉成指定模型的預測紀錄（同格式，可直接用 evaluate 的函式）。"""
-    if base.empty or model == "rule":
+def model_rec(base: pd.DataFrame, model: str, cal: dict, oos: dict, reg: pd.DataFrame | None = None,
+              abstain: bool = True) -> pd.DataFrame:
+    """把規則回溯紀錄 base 轉成指定模型的預測紀錄（同格式，可直接用 evaluate 的函式）。
+    reg：大盤環境 → 規則／校正模型的逆勢訊號打折；abstain：大盤高波動日改為「觀望」。"""
+    if base.empty:
+        return base
+    if model == "rule" and reg is None:
         return base
     r = base.copy()
+    rg = _reg_on(reg, r.index)
     for h in EV.HS:
         atr, cl = r["atr"].values, r["close"].values
-        if model == "calib":
+        if model == "rule":
+            col = "score" if h == T.HORIZON else "score20"
+            sc = RG.damp(r[col].values, rg["regime"].values, RG.DAMP5 if h == T.HORIZON else RG.DAMP20)
+            changed = np.abs(sc - r[col].values) > 1e-9
+            move = np.where(changed, EV._proj_move(sc, atr, h), r[f"p{h}"].values - cl)
+            band = (r[f"hi{h}"].values - r[f"lo{h}"].values) / 2
+            r[f"dirsig{h}"] = np.where(np.abs(sc) >= 2, np.sign(sc), 0)
+        elif model == "calib":
             c = cal.get(h)
             if not c:
                 return pd.DataFrame()
             w = np.array([c["best"][k] for k in T.KINDS])
             sc = r[[f"sub_{k}" for k in T.KINDS]].values @ w
+            if rg is not None:
+                sc = RG.damp(sc, rg["regime"].values, RG.DAMP5 if h == T.HORIZON else RG.DAMP20)
             move = EV._proj_move(sc, atr, h, c["best"].get("幅度", 1.0))
             band = 0.9 * atr * np.sqrt(h)
             r[f"dirsig{h}"] = np.where(np.abs(sc) >= 2, np.sign(sc), 0)
@@ -78,9 +115,43 @@ def model_rec(base: pd.DataFrame, model: str, cal: dict, oos: dict) -> pd.DataFr
             r[f"dirsig{h}"] = _dir_from_move(yhat)
         r[f"p{h}"] = cl + move
         r[f"lo{h}"], r[f"hi{h}"] = r[f"p{h}"] - band, r[f"p{h}"] + band
+        if abstain and rg is not None:
+            hv = rg["high_vol"].fillna(0).values > 0
+            widen_on_vol(r, h, hv)
     if model == "ml":
         r = r[r["p5"].notna() | r["p20"].notna()]
     return EV.add_results(r)
+
+
+def widen_on_vol(r: pd.DataFrame, h: int, mask) -> None:
+    """大盤高波動日：預估價與方向不變，可能區間放寬 1.5 倍並標記「高波動」。
+    （回測顯示高波動日強制觀望反而降低命中率，所以只放寬區間、提醒風險。）"""
+    mask = np.asarray(mask, bool)
+    r[f"hv{h}"] = mask.astype(int)
+    if mask.any():
+        half = (r[f"hi{h}"].values - r[f"lo{h}"].values) / 2 * 1.5
+        p = r[f"p{h}"].values
+        r.loc[mask, f"lo{h}"] = p[mask] - half[mask]
+        r.loc[mask, f"hi{h}"] = p[mask] + half[mask]
+
+
+def apply_abstain(r: pd.DataFrame, h: int, mask) -> None:
+    """觀望：不給方向，預估價 = 收盤價，區間放寬 1.5 倍。"""
+    mask = np.asarray(mask, bool)
+    if f"abst{h}" not in r:
+        r[f"abst{h}"] = 0
+    if not mask.any():
+        return
+    cl = r["close"].values
+    half = (r[f"hi{h}"].values - r[f"lo{h}"].values) / 2 * 1.5
+    r.loc[mask, f"p{h}"] = cl[mask]
+    r.loc[mask, f"lo{h}"] = cl[mask] - half[mask]
+    r.loc[mask, f"hi{h}"] = cl[mask] + half[mask]
+    if f"dirsig{h}" not in r:
+        sc = r["score" if h == T.HORIZON else "score20"].values
+        r[f"dirsig{h}"] = np.where(np.abs(sc) >= 2, np.sign(sc), 0)
+    r.loc[mask, f"dirsig{h}"] = 0
+    r.loc[mask, f"abst{h}"] = 1
 
 
 def metrics(rec: pd.DataFrame, h: int, days: int = COMPARE_DAYS) -> dict:
@@ -91,9 +162,11 @@ def metrics(rec: pd.DataFrame, h: int, days: int = COMPARE_DAYS) -> dict:
     pm = (d[f"p{h}"] / d["close"] - 1).values
     dd = d[d[f"dirp{h}"] != 0]
     ic = float(np.corrcoef(pm, move)[0, 1]) if np.std(pm) > 0 else 0.0
+    act = d[d[f"abst{h}"] == 0] if f"abst{h}" in d else d
     return {"n": len(d), "ok5": float(d[f"ok{h}"].mean()), "band": float(d[f"band{h}"].mean()),
             "naive": float(d[f"naive{h}"].mean()),
-            "dir": float(dd[f"dir{h}"].mean()) if len(dd) else None, "n_dir": len(dd), "ic": ic}
+            "dir": float(dd[f"dir{h}"].mean()) if len(dd) else None, "n_dir": len(dd), "ic": ic,
+            "n_act": len(act), "ok5_act": float(act[f"ok{h}"].mean()) if len(act) else None}
 
 
 def pick_champion(ms: dict) -> str:
@@ -111,10 +184,14 @@ def update(code: str, token: str = "", markets_done: set | None = None, log=prin
     meta = ensure_meta(code, token)
     mtype = meta.get("mtype")
     msym = D.market_symbol(code)
-    if markets_done is None or msym not in markets_done:
-        S.update_prices(msym, None, token)
-        if markets_done is not None:
-            markets_done.add(msym)
+    for sym in (msym,) + EXTRA_US:                     # 大盤指數＋前一晚美股／費半／VIX／台積電 ADR
+        if markets_done is None or sym not in markets_done:
+            try:
+                S.update_prices(sym, None, token)
+            except Exception as e:
+                log(f"  {sym} 略過：{e}")
+            if markets_done is not None:
+                markets_done.add(sym)
     n_new = S.update_prices(code, mtype, token)
     px = S.load_prices(code)
     if px.empty or len(px) < 160:
@@ -131,6 +208,8 @@ def update(code: str, token: str = "", markets_done: set | None = None, log=prin
     S.update_rule_rec(code, px, lambda d: T.analyze(d, light=True))
     base = S.load_rule_rec(code, px)
 
+    reg = regime_for(msym)
+
     # 3) 校正（用最近 500 日）
     cal = {h: EV.calibrate(base.iloc[-500:], h) for h in EV.HS}
     EV.save_calib(code, cal[5], cal[20])
@@ -138,10 +217,10 @@ def update(code: str, token: str = "", markets_done: set | None = None, log=prin
     # 4) 機器學習
     mkt = S.load_prices(msym)
     inst, mg = S.load_inst(code), S.load_margin(code)
-    feat = ml.build_features(px, mkt, inst, mg, base)
+    feat = ml.build_features(px, mkt, inst, mg, base, {"regime": reg, "us": us_ext()})
     ml_res, oos = {}, {}
     for h in EV.HS:
-        res = ml.walk_forward(feat, ml.labels(px, h), h)
+        res = ml.walk_forward(feat[ml.feature_cols(feat, h)], ml.labels(px, h), h)
         if res:
             ml_res[h] = res
             oos[h] = res["oos"]
@@ -151,7 +230,7 @@ def update(code: str, token: str = "", markets_done: set | None = None, log=prin
         cal_ml[f"sd{h}"] = ml_res[h]["resid_sd"] if h in ml_res else 1.5
 
     # 5) 比較選冠軍
-    recs = {m: model_rec(base, m, cal_ml, oos) for m in MODELS}
+    recs = {m: model_rec(base, m, cal_ml, oos, reg) for m in MODELS}
     for h in EV.HS:
         ms = {m: metrics(recs[m], h) for m in MODELS}
         champ = pick_champion(ms)
@@ -168,8 +247,11 @@ def update(code: str, token: str = "", markets_done: set | None = None, log=prin
     last = px.index[-1]
     close = float(px["Close"].iloc[-1])
     w5, w20 = EV.weights_for(code, True)
-    fr = T.analyze(px)
-    fc = T.analyze(px, w5=w5, w20=w20) if (w5 or w20) else fr
+    rg_now = _reg_on(reg, px.index[-1:])
+    r_now = float(rg_now["regime"].iloc[-1]) if rg_now is not None else None
+    hv_now = bool(rg_now["high_vol"].iloc[-1]) if rg_now is not None else False
+    fr = T.analyze(px, regime=r_now)
+    fc = T.analyze(px, w5=w5, w20=w20, regime=r_now) if (w5 or w20) else fr
     fc_all = {}
     for name, tr in (("rule", fr), ("calib", fc)):
         if tr:
@@ -191,6 +273,12 @@ def update(code: str, token: str = "", markets_done: set | None = None, log=prin
         f["score20"] = float(np.clip(f["y20"] * 3, -8, 8))
         fc_all["ml"] = f
     for m, f in fc_all.items():
+        f["regime"] = r_now
+        f["high_vol"] = hv_now
+        if hv_now:                                       # 高波動：區間放寬
+            for h in EV.HS:
+                half = (f[f"hi{h}"] - f[f"lo{h}"]) / 2 * 1.5
+                f[f"lo{h}"], f[f"hi{h}"] = f[f"p{h}"] - half, f[f"p{h}"] + half
         S.save_forecast(code, m, last, f)
         S.log_live(code, last, m, f)
     # 冠軍（5 日、20 日可以是不同模型）
@@ -203,7 +291,7 @@ def update(code: str, token: str = "", markets_done: set | None = None, log=prin
             champ.update({k: src[k] for k in (f"p{h}", f"lo{h}", f"hi{h}", f"dir{h}")})
             champ[f"model{h}"] = cm
     if champ and fc_all:
-        champ.update({"close": close, "atr": fc_all["rule"]["atr"]})
+        champ.update({"close": close, "atr": fc_all["rule"]["atr"], "regime": r_now, "high_vol": hv_now})
         champ["score"] = fc_all[champ["model5"]]["score"]
         champ["score20"] = fc_all[champ["model20"]]["score20"]
         S.save_forecast(code, "champion", last, champ)
@@ -236,8 +324,12 @@ def needs_update(code: str, hours: float = 6) -> bool:
     return (dt.datetime.now() - dt.datetime.fromisoformat(lu)).total_seconds() > hours * 3600
 
 
-def champion_rec(recs: dict, champs: dict) -> pd.DataFrame:
-    """各週期採用冠軍模型的預測，組成一份紀錄。"""
+CONFLICT_ABSTAIN = False    # 規則模型與機器學習方向相反時，最佳模型改為觀望
+
+
+def champion_rec(recs: dict, champs: dict, conflict: bool | None = None) -> pd.DataFrame:
+    """各週期採用冠軍模型的預測，組成一份紀錄；冠軍與另一模型方向相反時觀望。"""
+    conflict = CONFLICT_ABSTAIN if conflict is None else conflict
     base = recs.get("rule", pd.DataFrame())
     if base.empty:
         return base
@@ -250,6 +342,14 @@ def champion_rec(recs: dict, champs: dict) -> pd.DataFrame:
         for col in (f"p{h}", f"lo{h}", f"hi{h}"):
             r[col] = src[col]
         r[f"dirsig{h}"] = src[f"dirp{h}"]
+        r[f"abst{h}"] = src[f"abst{h}"].fillna(0).values if f"abst{h}" in src else 0
+        if conflict:
+            other = [m for m in ("rule", "ml") if m != champs.get(h)]
+            o = recs.get(other[0]) if other else None
+            if o is not None and not o.empty and f"dirp{h}" in o:
+                od = o[f"dirp{h}"].reindex(r.index).fillna(0).values
+                cd = r[f"dirsig{h}"].fillna(0).values
+                apply_abstain(r, h, (od * cd) < 0)
     r = r[r["p5"].notna()]
     return EV.add_results(r)
 

@@ -29,6 +29,7 @@ import pipeline as P
 import store as S
 import trend as T
 import trend_chart as TC
+import regime as RG
 
 ROOT = Path(__file__).parent
 WEB, SITE = ROOT / "web", ROOT / "site"
@@ -304,7 +305,7 @@ def build(repo: str = "") -> Path:
         stocks[c] = clean({k: p[k] for k in ("code", "name", "tw", "date", "close", "chg", "pct", "dates")} | {
             "spark": [round(float(v), 4) for v in px["Close"].iloc[-30:]],
             "forecasts": {m: {k: f.get(k) for k in ("close", "p5", "lo5", "hi5", "p20", "lo20", "hi20", "dir5", "dir20",
-                                                    "model5", "model20")} for m, f in p["forecasts"].items()},
+                                                    "model5", "model20", "high_vol")} for m, f in p["forecasts"].items()},
             "champion": {h: p["states"][h]["champion"] for h in p["states"]},
             "ok5": {h: {m: (v or {}).get("ok5") for m, v in (p["states"][h]["metrics"] or {}).items()}
                     for h in p["states"]},
@@ -312,7 +313,16 @@ def build(repo: str = "") -> Path:
         print(f"  ✓ {c}")
 
     now = dt.datetime.now()
-    summary = {"updated": now.strftime("%Y-%m-%d %H:%M"), "repo": repo, "lists": cfg["watchlists"],
+    market = {}
+    for nm, sym in (("台股", "^TWII"), ("美股", "^GSPC")):
+        try:
+            if any(D.market_symbol(c) == sym for c in codes):
+                sm = RG.summary(P.regime_for(sym))
+                if sm:
+                    market[nm] = sm
+        except Exception as e:
+            print(f"  大盤環境 {sym} 略過：{e}")
+    summary = {"updated": now.strftime("%Y-%m-%d %H:%M"), "repo": repo, "lists": cfg["watchlists"], "market": market,
                "stocks": stocks, "model_names": P.MODEL_NAME}
     (SITE / "data" / "summary.json").write_text(json.dumps(clean(summary), ensure_ascii=False), encoding="utf-8")
     (SITE / ".nojekyll").write_text("")

@@ -24,14 +24,22 @@ FEATURE_NAMES = {
     "inst5": "法人 5 日買賣超/均量", "inst20": "法人 20 日買賣超/均量", "foreign5": "外資 5 日/均量",
     "trust5": "投信 5 日/均量", "margin_chg5": "融資 5 日增減%", "short_ratio": "券資比",
     "rule_score": "規則分數（5日）", "rule_score20": "規則分數（20日）",
+    "rsi6": "RSI(6)", "pv_div": "量縮上漲（量價背離）",
+    "mkt_regime": "大盤多空格局", "mkt_mrsi6": "大盤月線 RSI(6)", "mkt_wrsi6": "大盤週線 RSI(6)",
+    "mkt_bear_div": "大盤月線空頭背離", "mkt_vol_ratio": "大盤波動度暴增", "mkt_high_vol": "大盤高波動日",
+    "us_ret1": "前一晚美股 S&P 500", "sox_ret1": "前一晚費城半導體", "tsm_ret1": "前一晚台積電 ADR",
+    "tsm_ret5": "台積電 ADR 近 5 日", "vix": "VIX 恐慌指數", "vix_chg5": "VIX 5 日變化",
     **{f"sub_{k}": f"規則：{k}" for k in T.KINDS},
 }
 
 
 # ================================================================ 特徵
 def build_features(px: pd.DataFrame, mkt: pd.DataFrame | None, inst: pd.DataFrame | None,
-                   mg: pd.DataFrame | None, rule: pd.DataFrame | None) -> pd.DataFrame:
-    """每一列只用『當天收盤以前』的資料。"""
+                   mg: pd.DataFrame | None, rule: pd.DataFrame | None, ext: dict | None = None) -> pd.DataFrame:
+    """每一列只用『當天收盤以前』的資料。
+    ext：{"regime": 大盤環境 DataFrame, "us": {"^GSPC": 日K, "^SOX": 日K, "TSM": 日K, "^VIX": 日K}}
+    美股資料以「美股日期 ≤ 台股日期」對齊：台股第 t 天的列，用美股第 t 天收盤（台灣時間 t+1 清晨）。
+    台灣時間 16:30 更新時那筆還沒出現，就沿用前一天（不偷看）；06:30 更新時會補上。"""
     c, o, h, l, v = (px[k].astype(float) for k in ("Close", "Open", "High", "Low", "Volume"))
     f = pd.DataFrame(index=px.index)
     for n in (1, 5, 20, 60):
@@ -58,6 +66,38 @@ def build_features(px: pd.DataFrame, mkt: pd.DataFrame | None, inst: pd.DataFram
     f["body"] = (c - o) / rng
     f["upper"] = (h - np.maximum(o, c)) / rng
     f["lower"] = (np.minimum(o, c) - l) / rng
+    up6, dn6 = d.clip(lower=0).rolling(6).mean(), (-d.clip(upper=0)).rolling(6).mean()
+    f["rsi6"] = 100 * up6 / (up6 + dn6).replace(0, np.nan)
+    f["pv_div"] = ((f["ret5"] > 0) & (f["vol5_20"] < 0.8)).astype(float)
+
+    ext = ext or {}
+    reg = ext.get("regime")
+    if reg is not None and not reg.empty:
+        rr_ = reg.reindex(px.index, method="ffill")
+        f["mkt_regime"] = rr_["regime"]
+        f["mkt_mrsi6"] = rr_["mrsi6"]
+        f["mkt_wrsi6"] = rr_["wrsi6"]
+        f["mkt_bear_div"] = rr_["bear_div"]
+        f["mkt_vol_ratio"] = rr_["vol_ratio"]
+        f["mkt_high_vol"] = rr_["high_vol"]
+    else:
+        for k in ("mkt_regime", "mkt_mrsi6", "mkt_wrsi6", "mkt_bear_div", "mkt_vol_ratio", "mkt_high_vol"):
+            f[k] = 0.0
+    us = ext.get("us") or {}
+
+    def us_close(sym):
+        u = us.get(sym)
+        if u is None or u.empty:
+            return None
+        return u["Close"].astype(float).reindex(px.index, method="ffill")
+    for sym, key in (("^GSPC", "us_ret1"), ("^SOX", "sox_ret1"), ("TSM", "tsm_ret1")):
+        s_ = us_close(sym)
+        f[key] = s_.pct_change(fill_method=None) if s_ is not None else 0.0
+    s_ = us_close("TSM")
+    f["tsm_ret5"] = s_.pct_change(5, fill_method=None) if s_ is not None else 0.0
+    s_ = us_close("^VIX")
+    f["vix"] = s_ if s_ is not None else 0.0
+    f["vix_chg5"] = s_.pct_change(5, fill_method=None) if s_ is not None else 0.0
 
     if mkt is not None and not mkt.empty:
         mc = mkt["Close"].reindex(px.index).ffill()
@@ -98,6 +138,17 @@ def build_features(px: pd.DataFrame, mkt: pd.DataFrame | None, inst: pd.DataFram
         for k in cols + ["rule_score", "rule_score20"]:
             f[k] = 0.0
     return f.replace([np.inf, -np.inf], np.nan)
+
+
+# 依回測結果決定各週期使用的特徵（見 README「改版命中率比較」）
+US_COLS = ["us_ret1", "sox_ret1", "tsm_ret1", "tsm_ret5", "vix", "vix_chg5"]
+REG_COLS = ["mkt_regime", "mkt_mrsi6", "mkt_wrsi6", "mkt_bear_div", "mkt_vol_ratio", "mkt_high_vol"]
+NEW_TECH = ["rsi6", "pv_div"]
+EXCLUDE = {5: set(), 20: set(REG_COLS + NEW_TECH)}   # 20 日：大盤格局交給規則濾網，ML 只加美股特徵
+
+
+def feature_cols(feat: pd.DataFrame, h: int) -> list[str]:
+    return [c for c in feat.columns if c not in EXCLUDE.get(h, set())]
 
 
 CORE = ["ret60", "bias60", "atr_pct", "vol_ratio", "rsi14", "dist_hi250", "ma60_slope"]

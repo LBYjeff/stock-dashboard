@@ -513,6 +513,23 @@ def page_predict():
     if code and code in codes:
         return page_predict_stock(code, model)
     nav("預測", f"{P.MODEL_NAME.get(model, model)}・未來 5／20 個交易日")
+    import regime as RG
+    cells = []
+    for nm, sym in (("台股", "^TWII"), ("美股", "^GSPC")):
+        if not any(D.market_symbol(c) == sym for c in codes):
+            continue
+        try:
+            x = RG.summary(P.regime_for(sym))
+        except Exception:
+            x = None
+        if not x:
+            continue
+        colr = UP if (x["regime"] or 0) > 0.15 else DOWN if (x["regime"] or 0) < -0.15 else GRAY
+        sub = f"月線 RSI6 {x['mrsi6']:.0f}・週線 RSI6 {x['wrsi6']:.0f}・" + "・".join(x["notes"]) + \
+              ("<br>⚡ 高波動：預測區間已放寬 1.5 倍" if x["high_vol"] else "")
+        cells.append(cell(nm, f'<b style="color:{colr}">{x["label"]}</b>', sub=sub))
+    if cells:
+        section("大盤環境", "20 日預測會依大盤格局調整：逆勢訊號打折。", "".join(cells))
     rows = []
     for c in codes:
         f = _fc(c, stamp(c)).get(model)
