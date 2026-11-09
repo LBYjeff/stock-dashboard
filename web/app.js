@@ -107,7 +107,10 @@ function marketCard() {
     const sub = [`月線 RSI6 ${num(x.mrsi6, 0)}・週線 RSI6 ${num(x.wrsi6, 0)}`, ...(x.notes || [])].join("・") +
       (x.high_vol ? `<br><span style="color:var(--orange)">⚡ 高波動：預測區間已放寬 1.5 倍，請降低部位</span>` : "");
     return cell(`${esc(k)}`, `<b style="color:${c}">${esc(x.label)}</b> ${x.regime == null ? "" : sgn(x.regime, 2)}`, { sub });
-  }).join(""), "20 日預測會依大盤格局調整：空頭時逆勢的偏多訊號打折、多頭時逆勢的偏空訊號打折。");
+  }).join(""), "20 日預測會依大盤格局調整：空頭時逆勢的偏多訊號打折、多頭時逆勢的偏空訊號打折。") +
+  ((m["台股"] || {}).chips ? section("台股大盤籌碼", m["台股"].chips.map((x) =>
+    cell(esc(x.name), `<span style="color:${col(x.dir)}">${esc(x.value)}</span>`, { sub: `${esc(x.sub)}・${esc(x.date)}` })).join(""),
+    "機器學習會為每檔台股分別測試這些籌碼資料，有讓預測更準才採用（見「檢討」的模型比較）。") : "");
 }
 const fmtVol = (v, tw) => tw ? num(v / 1000, 0) + " 張" : v >= 1e9 ? num(v / 1e9) + "B" : v >= 1e6 ? num(v / 1e6) + "M" : num(v, 0);
 
